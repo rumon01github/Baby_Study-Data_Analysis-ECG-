@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the NeoTex paper (reference to be added on publication) and this repository."
+title: "NeoTex ECG analysis: reliable heart rate from a textile infant belt"
+authors:
+  - family-names: "Al Rumon"
+    given-names: "Md Abdullah"
+    affiliation: "Wearable Biosensing Lab, University of Rhode Island"
+license: MIT
+repository-code: "https://github.com/<user>/neotex-ecg-analysis"
+year: 2026

@@ -1,0 +1,24 @@
+id,trial,start_s,category,n_auto
+S01,P01 T01,931.0,medium,13
+S02,P03 T02,161.0,clean_still,18
+S03,P03 T02,198.3,wire_contact,17
+S04,P06 T01,281.0,clean_still,21
+S05,P02 T03,471.0,medium,4
+S06,P05 T07,151.0,medium,14
+S07,P03 T02,131.0,clean_motion,14
+S08,P03 T01,51.0,clean_still,18
+S09,P03 T02,104.8,wire_contact,21
+S10,P03 T02,90.8,wire_contact,20
+S11,P06 T01,11.0,clean_motion,17
+S12,P05 T04,191.0,clean_motion,19
+S13,P09 T02,91.0,clean_still,13
+S14,P09 T03,0.01,wire_contact,9
+S15,P04 T03,151.0,medium,19
+S16,P09 T02,221.0,clean_motion,10
+S17,P10 T01,151.0,medium,19
+S18,P03 T01,41.0,clean_motion,17
+S19,P09 T03,111.5,wire_contact,15
+S20,P09 T03,225.5,wire_contact,10
+S21,P05 T04,31.0,clean_still,16
+S22,P09 T05,11.0,clean_motion,11
+S23,P04 T05,151.0,medium,17

@@ -1,0 +1,13 @@
+Trial,Tier,n_annot,lag_s,events_in_data,basis
+P01 T01,Good,182,25.5,122,"timestamp (explicit camera tz), annotation r weak; ±3 s"
+P01 T02,Poor,119,22.0,119,timestamp; Poor tier
+P02 T01,Unrated,195,46.6,195,annotation–gyro r=0.37; Unrated tier
+P03 T01,Good,51,32.6,39,clock + pixel-motion (prior sync check); annotation–gyro disagrees (7.8) → CHECK
+P03 T02,Good,90,5.8,90,annotation–gyro r=0.37
+P04 T01,Poor,200,-0.1,97,annotation–gyro r=0.45; Poor tier
+P04 T02,Medium,109,-52.5,78,annotation–gyro r=0.32
+P04 T03,Good,46,40.5,46,annotation–gyro r=0.42
+P06 T02,Poor,102,,0,unresolved; Poor tier
+P06 T04,Medium,82,-142.5,54,annotation–gyro r=0.44
+P08 T03,Medium,111,,0,unresolved (assumed camera tz); need one landmark
+P09 T03,Good,150,0.0,148,"annotation–gyro r=0.30, prior check"

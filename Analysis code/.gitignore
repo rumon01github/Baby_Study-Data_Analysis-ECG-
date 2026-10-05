@@ -1,0 +1,8 @@
+work/
+work_*/
+synthetic_data/
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+*.pkl
