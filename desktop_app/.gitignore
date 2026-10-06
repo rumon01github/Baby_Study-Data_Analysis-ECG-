@@ -1,0 +1,9 @@
+.packages/
+data/
+work/
+__pycache__/
+local-runtime.json
+study-settings.json
+*.lnk
+*.csv
+p03-data.js

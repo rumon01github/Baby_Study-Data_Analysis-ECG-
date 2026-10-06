@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 .ipynb_checkpoints/
 *.pkl
+
+# Local study recordings
+/data/
