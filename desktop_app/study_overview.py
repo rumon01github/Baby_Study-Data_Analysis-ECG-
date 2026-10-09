@@ -5,7 +5,7 @@ import pandas as pd
 from PyQt6 import QtWidgets
 
 
-def inventory(folder):
+def inventory(folder,app_root=None):
     records={}
     for path in Path(folder).rglob('*'):
         if not path.is_file():continue
@@ -26,9 +26,10 @@ def inventory(folder):
           'Movement':'Yes' if {'GyroX','GyroY','GyroZ'}.issubset(channels) else 'No',
           'BIOPAC':'Yes' if any('biopac' in n for n in names) else 'No',
           'Video':'Yes' if any(f.suffix.lower() in {'.mp4','.mov','.avi'} for f in files) else 'No',
-          'Annotations':'Yes' if any('annotation' in n and n.endswith('.csv') for n in names) else 'No',
-          'PPG files':'Yes' if any('ppg' in n for n in names) else 'Not identified',
-          'SKT files':'Yes' if any('skt' in n or 'temperature' in n for n in names) else 'Not identified',
+          'Annotations':'Yes' if any('annotation' in n and n.endswith('.csv') for n in names) or (Path(app_root or Path(__file__).parent)/'annotations_latest'/f'{p}_{t}_annotations.csv').exists() else 'No',
+          'Excluded':'Yes' if any('(excluded)' in str(f).lower() for f in files) else 'No',
+          'PPG files':'Yes' if {'IR','Red'} & channels else 'Not identified',
+          'SKT files':'Yes' if {'Temp','Temp_corrected_C'} & channels else 'Not identified',
           'Quality/results files':sum(any(word in n for word in ['sqi','quality','result','window']) for n in names),
           '_files':files})
     return rows
@@ -50,7 +51,10 @@ class Overview(QtWidgets.QWidget):
         note=QtWidgets.QLabel('Availability is an inventory, not a quality judgement. Existing results are listed as files; the summary computes ECG quality using the repository method. PPG/SKT quality is not calculated. Duplicate copies count as files but each participant/trial is analysed once.');note.setWordWrap(True);layout.addWidget(note)
     def scan(self,folder):
         from study_summary import StudySummary
-        self.records=inventory(folder);self.location.setText(str(Path(folder).resolve()))
+        self.set_records(folder,inventory(folder))
+    def set_records(self,folder,records):
+        from study_summary import StudySummary
+        self.records=records;self.location.setText(str(Path(folder).resolve()))
         StudySummary.fill(self.table,pd.DataFrame([{k:v for k,v in r.items() if k!='_files'} for r in self.records]))
         participants=len({r['Participant'] for r in self.records});trials=sum(r['Trial']!='Participant files' for r in self.records)
         self.status.setText(f'{participants} participants • {trials} trial folders • {sum(r["Files"] for r in self.records)} files. Select a row, or summarise all analysable recordings.')
@@ -60,6 +64,6 @@ class Overview(QtWidgets.QWidget):
         r=self.records[row];o=self.owner
         if (r['Participant'],r['Trial']) not in o.paths:
             self.status.setText('This recording has no supported BELT CSV to analyse. Its available files are listed below.');return
-        o.participant.setCurrentText(r['Participant']);o.trial.setCurrentText(r['Trial']);o.load_trial();o.tabs.setCurrentWidget(o.study)
+        o.participant.setCurrentText(r['Participant']);o.trial.setCurrentIndex(next((i for i in range(o.trial.count()) if o.trial.itemText(i).split()[0]==r['Trial']),0));o.load_trial();o.tabs.setCurrentWidget(o.signals)
     def analyze(self):
         o=self.owner;o.study.scope.setCurrentIndex(3);o.tabs.setCurrentWidget(o.study);o.study.start()

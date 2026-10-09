@@ -22,3 +22,9 @@ def latest_annotations(root, trial):
         if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end):
             raise ValueError(f'Invalid interval in {path.name}')
     return rows
+
+
+def apply_latest(root,data):
+    if data.get('annotation_override'):return data
+    latest=latest_annotations(root,data['trial'])
+    return dict(data,annotations=latest,annotations_synced=True) if latest is not None else data

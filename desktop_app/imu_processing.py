@@ -1,6 +1,7 @@
 """Label-free exploratory movement detection; not InfantMotion2Vec."""
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
+from data_validity import mask_imu
 
 
 def process_imu(time, acc, gyro):
@@ -11,6 +12,7 @@ def process_imu(time, acc, gyro):
         raise ValueError('IMU timestamps must be finite and strictly increasing.')
     dt=float(np.median(np.diff(t)));fs=1/dt
     if fs<10:raise ValueError('IMU sampling below 10 Hz is unsupported.')
+    a,g=mask_imu(t,a,g)
     valid=np.all(np.isfinite(a),axis=1)&np.all(np.isfinite(g),axis=1)
     # Do not interpolate across missing rows or gaps greater than three intervals.
     breaks=np.r_[True,(np.diff(t)>3*dt)|(~valid[:-1])|(~valid[1:]),True]
@@ -47,7 +49,8 @@ def process_imu(time, acc, gyro):
     for n in good:gr[n]=np.sqrt(np.mean(np.sum((gg[masks[n]]-bias)**2,axis=1)))
     def threshold(v):
         base=v[chosen];med=np.median(base)
-        return float(max(1.,med+3*1.4826*np.median(np.abs(base-med))))
+        allv=v[good];center=np.median(allv);spread=1.4826*np.median(np.abs(allv-center))
+        return float(max(40.96 if v is ar else 20.,med+6*1.4826*np.median(np.abs(base-med)),center+6*spread))
     return dict(time=starts+.25,acc=ar,gyro=gr,acc_threshold=threshold(ar),gyro_threshold=threshold(gr),
                 reference_starts=starts[chosen],sampling_hz=fs,gyro_bias=bias)
 
@@ -58,7 +61,8 @@ def summary(result,start):
     coverage=valid.sum()/10
     if not valid.any():return 'IMU unavailable'
     am=a[valid]>result['acc_threshold'];gm=g[valid]>result['gyro_threshold'];moving=am|gm
-    label='Movement detected' if moving.any() else 'No movement detected'
+    flags=np.zeros(len(a),bool);flags[valid]=moving
+    label='Movement detected' if np.any(flags[1:]&flags[:-1]) else 'No sustained movement detected'
     if coverage<.8:label='Insufficient IMU coverage'
     return (f'{label} · movement {moving.mean()*100:.0f}% of valid time '
             f'(acc {am.mean()*100:.0f}%, gyro {gm.mean()*100:.0f}%) · '

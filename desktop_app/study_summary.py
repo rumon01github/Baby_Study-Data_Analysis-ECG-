@@ -7,14 +7,14 @@ import pandas as pd
 def window_rows(data, reviewed=True, offset=None):
     ann=data.get('annotations',[])
     offsets=[float(a['ecg_start_s'])-float(a['video_start_s']) for a in ann if str(a.get('ecg_start_s','')).strip()]
-    off=offset if offset is not None else (float(np.median(offsets)) if offsets else 0)
+    off=0 if data.get('annotations_synced') else (offset if offset is not None else (float(np.median(offsets)) if offsets else 0))
     participant,trial=data['trial'].split()
     rows=[]
     for w in data['windows']:
         a=float(w['Start_s']);moving=w.get('Moving_pct',w.get('Moving_%'))
         labels=sorted({r['label'].replace('_',' ') for r in ann if (not reviewed or r.get('review_status')=='human_reviewed') and float(r['video_end_s'])+off>a and float(r['video_start_s'])+off<a+5})
         rows.append(dict(Participant=participant,Trial=trial,Start_s=a,End_s=a+5,Moving_pct=moving,
-            Movement_group='Unknown' if moving is None else ('Still' if moving<10 else 'Light' if moving<50 else 'Active'),
+            Movement_group='Unknown' if moving is None or not np.isfinite(moving) else ('Still' if moving<10 else 'Light' if moving<50 else 'Active'),
             Activities='; '.join(labels) or 'Unlabelled',Belt_bSQI=w.get('Belt_bSQI'),Belt_tSQI=w.get('Belt_tSQI'),
             Pass_gate=w.get('Belt_good'),Bio_bSQI=w.get('Bio_bSQI')))
     return rows
@@ -74,9 +74,9 @@ class StudySummary(QtWidgets.QWidget):
     def keys(self):
         o=self.owner
         if self.scope.currentIndex()==0:return [tuple(o.data['trial'].split())] if o.data else []
-        if self.scope.currentIndex()==3:return sorted(o.paths)
+        if self.scope.currentIndex()==3:return sorted(k for k,v in o.paths.items() if '(excluded)' not in str(v).lower())
         people=[o.participant.currentText()] if self.scope.currentIndex()==1 else [self.people.item(i).text() for i in range(self.people.count()) if self.people.item(i).checkState()==QtCore.Qt.CheckState.Checked]
-        return sorted(k for k in o.paths if k[0] in people)
+        return sorted(k for k in o.paths if k[0] in people and '(excluded)' not in str(o.paths[k]).lower())
     def start(self):
         o=self.owner
         if o.worker and o.worker.isRunning():return
@@ -90,9 +90,9 @@ class StudySummary(QtWidgets.QWidget):
             self.failures.append(' '.join(key));self.next_trial();return
         # Sequential calculations keep memory bounded and retain the currently viewed trial.
         import sys
-        Worker=sys.modules[o.__class__.__module__].Worker
-        o.worker=Worker(path,' '.join(key));self.status.setText('Calculating '+ ' '.join(key)+f' — {len(self.queue)} trials remaining…')
-        o.worker.ready.connect(lambda data:o.datasets.__setitem__(data['trial'],data))
+        module=sys.modules[o.__class__.__module__];Worker=module.Worker
+        o.worker=Worker(path,' '.join(key),module.STUDY_ROOT);self.status.setText('Calculating '+ ' '.join(key)+f' — {len(self.queue)} trials remaining…')
+        o.worker.ready.connect(o.cache_trial)
         o.worker.failed.connect(lambda error:self.failures.append(' '.join(key)+': '+error))
         o.worker.finished.connect(self.next_trial);o.worker.start()
     def refresh(self,*_):
@@ -121,7 +121,9 @@ class StudySummary(QtWidgets.QWidget):
         if self.running:return
         r=self.rows[row];o=self.owner;data=o.datasets[r['Participant']+' '+r['Trial']]
         o.participant.setCurrentText(r['Participant']);o.trial.setCurrentText(r['Trial']);o.loaded(data)
-        o.select(next(w for w in data['windows'] if w['Start_s']==r['Start_s']),True);o.tabs.setCurrentIndex(0)
+        o.auto_timer.stop()
+        o.signals.span.setCurrentText('5');o.signals.start.setValue(r['Start_s']);o.signals.range()
+        o.select(next(w for w in data['windows'] if w['Start_s']==r['Start_s']),True);o.tabs.setCurrentWidget(o.signals)
     def export(self):
         if not self.rows:return
         path,_=QtWidgets.QFileDialog.getSaveFileName(self,'Save combined windows','','CSV (*.csv)')

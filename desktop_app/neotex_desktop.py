@@ -2,7 +2,7 @@
 import sys, os, json, pathlib, re, tempfile, importlib
 ROOT=pathlib.Path(__file__).resolve().parent
 sys.dont_write_bytecode=True
-LOCAL_RUNTIME=json.loads((ROOT/'local-runtime.json').read_text(encoding='utf-8')) if (ROOT/'local-runtime.json').exists() else {}
+LOCAL_RUNTIME=json.loads((ROOT/'local-runtime.json').read_text(encoding='utf-8-sig')) if (ROOT/'local-runtime.json').exists() else {}
 DEMO_ROOT=pathlib.Path(LOCAL_RUNTIME.get('demo_folder',str(ROOT)))
 sys.path.insert(0,LOCAL_RUNTIME.get('packages',str(ROOT/'.packages')))
 os.environ.setdefault('PYQTGRAPH_QT_LIB','PyQt6')
@@ -23,19 +23,39 @@ def bundled():
     if errors:raise RuntimeError(errors[0])
     results[0]['annotations']=data['annotations']
     return results[0]
+def canonical_folder(folder):
+    p=pathlib.Path(folder)
+    return p/'Organized Study Data' if (p/'Organized Study Data').is_dir() else p
+
+def excluded(path):return path is not None and '(excluded)' in str(path).lower()
+
 def discover(folder):
-    found={}
-    for f in pathlib.Path(folder).rglob('*BELT*.csv'):
+    folder=canonical_folder(folder);found={}
+    for f in sorted(folder.rglob('*BELT*.csv')):
+        if any(x.lower() in {'.venv','normalized_records','.git'} for x in f.parts):continue
         match=re.search(r'(P\d+).*?(T\d+)',f.name)
-        if match:
-            key=match.groups()
-            # Prefer the main Organized Study Data layout over curated duplicate folders.
-            priority=('Good ' in str(f),len(f.parts))
-            if key not in found or priority<found[key][0]: found[key]=(priority,f)
+        if not match:continue
+        try:
+            cols=set(pd.read_csv(f,nrows=0).columns)
+            if not {'time_s','ECG','AccX','AccY','AccZ','GyroX','GyroY','GyroZ'}<=cols:continue
+        except (OSError,ValueError):continue
+        key=match.groups();priority=('Good ' in str(f),len(f.parts),str(f).lower())
+        if key not in found or priority<found[key][0]:found[key]=(priority,f)
     return {k:v[1] for k,v in found.items()}
+
+class FolderWorker(QtCore.QThread):
+    ready=QtCore.pyqtSignal(object);failed=QtCore.pyqtSignal(str)
+    def __init__(self,folder):super().__init__();self.folder=canonical_folder(folder)
+    def run(self):
+        try:
+            from study_overview import inventory
+            paths=discover(self.folder)
+            self.ready.emit((self.folder,paths,inventory(self.folder,ROOT)))
+        except Exception as e:self.failed.emit(str(e))
+
 class Worker(QtCore.QThread):
     ready=QtCore.pyqtSignal(object); failed=QtCore.pyqtSignal(str)
-    def __init__(self,belt,trial): super().__init__();self.belt=belt;self.trial=trial
+    def __init__(self,belt,trial,study_root=None): super().__init__();self.belt=pathlib.Path(belt);self.trial=trial;self.study_root=study_root
     def run(self):
         try:
             import neurokit2 as nk
@@ -70,9 +90,13 @@ class Worker(QtCore.QThread):
                          'nk':k,'ham':det(y,500,'hamilton2002')}
                     dt=float(np.median(np.diff(bp.time_s)))
                     if abs(dt-.001)>.0001:raise ValueError('BIOPAC is not on the expected 1000 Hz grid. Check sampling before using the repository method.')
+            b_raw=b.copy()
+            from data_validity import mask_imu
+            av,gv=mask_imu(b.time_s,b[['AccX','AccY','AccZ']],b[['GyroX','GyroY','GyroZ']])
+            b[['AccX','AccY','AccZ']]=av;b[['GyroX','GyroY','GyroZ']]=gv
             b['gyro']=np.linalg.norm(b[['GyroX','GyroY','GyroZ']],axis=1)
             b['acc_g']=np.linalg.norm(b[['AccX','AccY','AccZ']],axis=1)/4096
-            base=np.percentile(b.gyro,20); end=min(b.time_s.iloc[-1],bp.time_s.iloc[-1]) if bio else b.time_s.iloc[-1]
+            base=np.nanpercentile(b.gyro,20) if b.gyro.notna().any() else np.nan; end=min(b.time_s.iloc[-1],bp.time_s.iloc[-1]) if bio else b.time_s.iloc[-1]
             windows=[]
             for a in np.arange(0,end-5+1e-6,5):
                 lag=local_lag(beats(belt),beats(bio),a,a+5) if bio else 0
@@ -82,21 +106,27 @@ class Worker(QtCore.QThread):
                 z=belt['sig'][max(0,int((a-belt['t0'])*250)):int((a+5-belt['t0'])*250)]
                 f,p=signal.welch(z,250,nperseg=1000)
                 band=lambda lo,hi:p[(f>=lo)&(f<=hi)].sum()
-                share=float((sub.gyro>base+200).mean()*100)
+                share=float((sub.gyro.dropna()>base+200).mean()*100) if sub.gyro.notna().mean()>=.8 else np.nan
                 windows.append(dict(Start_s=float(a),Moving_pct=share,gyro_mean=float(sub.gyro.mean()),gyro_std=float(sub.gyro.std()),
                   acc_std=float(sub.acc_g.std()),Belt_bSQI=st['bsqi'],Belt_tSQI=st['tsqi'],Belt_good=st['good'],
                   Bio_bSQI=sb.get('bsqi'),kSQI=float(stats.kurtosis(z,fisher=False)),
                   pSQI=float(band(5,15)/band(5,40)) if band(5,40)>0 else None,
                   basSQI=float(1-band(0,1)/band(0,40)) if band(0,40)>0 else None))
             annotations=[]
-            candidates=pathlib.Path(STUDY_ROOT).rglob('*annotations*.csv') if STUDY_ROOT else self.belt.parent.glob('*annotations*.csv')
+            candidates=pathlib.Path(self.study_root).rglob('*annotations*.csv') if self.study_root else self.belt.parent.glob('*annotations*.csv')
             for af in candidates:
                 saved=pd.read_csv(af).fillna('')
                 if {'participant','trial','video_start_s','video_end_s','label'}.issubset(saved.columns):
                     saved=saved[(saved.participant.astype(str)+' '+saved.trial.astype(str))==self.trial]
                     annotations+=saved.to_dict('records')
             annotations=list({json.dumps(r,sort_keys=True,default=str):r for r in annotations}.values())
-            self.ready.emit(dict(trial=self.trial,windows=windows,trace=b.iloc[::5][['time_s','ECG','gyro','acc_g']].to_dict('records'),annotations=annotations,source_files=(str(self.belt),str(pairs[0]) if pairs else None)))
+            from annotation_loader import apply_latest
+            from signal_stack import signal_payload, prepare_signals
+            data=dict(trial=self.trial,windows=windows,trace=b.iloc[::5][['time_s','ECG','gyro','acc_g']].to_dict('records'),annotations=annotations,source_files=(str(self.belt),str(pairs[0]) if pairs else None),study_root=str(self.study_root),excluded=excluded(self.belt))
+            data=apply_latest(ROOT,data)
+            data['signals']=signal_payload(self.belt,pairs[0] if pairs else None,b_raw,bp if pairs else None)
+            prepare_signals(data)
+            self.ready.emit(data)
         except Exception as e:self.failed.emit(str(e))
 class Explorer(QtWidgets.QMainWindow):
     def __init__(self):
@@ -183,29 +213,28 @@ class Explorer(QtWidgets.QMainWindow):
         self.trial.currentTextChanged.connect(lambda *_:self.auto_timer.start())
         for w in [self.metric,self.quality,self.activity]:w.currentIndexChanged.connect(self.redraw)
         self.offset.valueChanged.connect(self.redraw);self.reviewed.toggled.connect(self.redraw);self.covered.toggled.connect(self.redraw)
-        if (DEMO_ROOT/'p03-data.js').exists():
-            self.populate({('P03','T01'):None});self.load_trial()
-        else:
-            self.populate({});self.message.setText('Use Study setup to choose your local study folder.')
-        if (DEMO_ROOT/'data').is_dir():self.overview.scan(DEMO_ROOT/'data')
-        self.tabs.setCurrentWidget(self.signals)
-        connected=False
-        try:
-            settings=ROOT/'study-settings.json'
-            if not settings.exists():settings=DEMO_ROOT/'study-settings.json'
-            folder=json.loads(settings.read_text(encoding='utf-8-sig')).get('folder')
-            if folder and pathlib.Path(folder).is_dir():connected=self.use_folder(folder)
-            elif folder:self.folder_status.setText('Saved study folder is unavailable. Use Change study folder to reconnect it.')
-        except (OSError,ValueError):pass
-        if not connected:
-            default=pathlib.Path(LOCAL_RUNTIME.get('study_folder',str(REPO/'data'/'Organized Study Data')))
-            if default.is_dir():self.use_folder(default)
+        self.folder_workers=[];self.folder_generation=0
+        self.populate({});self.tabs.setCurrentWidget(self.signals)
+        QtCore.QTimer.singleShot(0,self.connect_startup)
+    def connect_startup(self):
+        settings=ROOT/'study-settings.json'
+        if not settings.exists():settings=DEMO_ROOT/'study-settings.json'
+        try:folder=json.loads(settings.read_text(encoding='utf-8-sig')).get('folder')
+        except (OSError,ValueError):folder=None
+        if folder:
+            if pathlib.Path(folder).is_dir():self.use_folder(folder)
+            else:self.folder_status.setText('Saved folder unavailable: '+str(folder)+'. Change study folder to reconnect; your saved choice is retained.')
+            return
+        default=pathlib.Path(LOCAL_RUNTIME.get('study_folder',str(REPO/'data'/'Organized Study Data')))
+        if not default.is_dir():default=DEMO_ROOT/'data'/'Organized Study Data'
+        if default.is_dir():self.use_folder(default)
+        else:self.folder_status.setText('Choose your Organized Study Data folder.')
     def show_analysis(self,shown):
         for widget in self.simple_hidden:widget.setVisible(shown)
         self.tabs.tabBar().setVisible(shown)
         if not shown:self.tabs.setCurrentWidget(self.signals)
     def auto_load(self):
-        if not self.trial.currentText():return
+        if not self.trial.currentText().split(' ')[0]:return
         if self.worker and self.worker.isRunning():
             self.auto_timer.start();return
         self.load_trial()
@@ -215,23 +244,44 @@ class Explorer(QtWidgets.QMainWindow):
         self.participant.blockSignals(False);self.trial.blockSignals(False)
         self.study.set_participants(sorted(set(p for p,t in paths)))
     def populate_trials(self,*_):
-        self.trial.clear();self.trial.addItems(sorted(t for p,t in self.paths if p==self.participant.currentText()))
+        self.trial.clear()
+        for p,t in sorted(self.paths):
+            if p==self.participant.currentText():self.trial.addItem(t+(' (Excluded)' if excluded(self.paths[(p,t)]) else ''))
     def browse(self):
         folder=QtWidgets.QFileDialog.getExistingDirectory(self,'Choose Organized Study Data or BABY DATA',str(STUDY_ROOT or REPO/'data'))
         if folder:self.use_folder(folder)
     def use_folder(self,folder):
+        self.auto_timer.stop();self.folder_generation+=1;generation=self.folder_generation
+        self.pending_folder=True;self.study.queue=[]
+        self.folder_status.setText('Scanning study folder...')
+        worker=FolderWorker(folder);self.folder_workers.append(worker)
+        worker.ready.connect(lambda result:self.accept_folder(result,generation))
+        worker.failed.connect(lambda error:self.folder_failed(error,generation))
+        worker.finished.connect(lambda:self.folder_workers.remove(worker))
+        worker.start();return True
+    def folder_failed(self,error,generation):
+        if generation==self.folder_generation:
+            self.pending_folder=False;self.folder_status.setText('Could not scan folder: '+error)
+    def accept_folder(self,result,generation):
         global STUDY_ROOT
-        found=discover(folder)
-        if not found:QtWidgets.QMessageBox.information(self,'No recordings','No participant/trial BELT CSV files were found.');return
-        STUDY_ROOT=folder;self.datasets={};self.populate(found);self.overview.scan(folder);self.tabs.setCurrentWidget(self.signals)
-        self.folder_status.setText(f'{len({p for p,t in found})} participants • {len(found)} trials • {folder}')
-        if len(found)==1:self.folder_status.setText(f'Only {next(iter(found))[0]} {next(iter(found))[1]} is in this folder. Change study folder to the full dataset to access other recordings.')
-        (ROOT/'study-settings.json').write_text(json.dumps({'folder':str(folder)}),encoding='utf-8')
-        self.message.setText(f'{len(found)} recordings available. Loading selected trial…');self.auto_timer.start()
-        return True
+        if generation!=self.folder_generation:return
+        self.pending_folder=False;folder,found,records=result
+        if not found:self.folder_status.setText('No loadable recordings found. Choose Organized Study Data.');return
+        STUDY_ROOT=folder;self.datasets={};self.data=None;self.paths=found
+        self.populate(found);self.overview.set_records(folder,records);self.tabs.setCurrentWidget(self.signals)
+        self.folder_status.setText(f'{len({p for p,t in found})} participants · {len(found)} trials · {folder}')
+        self.message.setText('Loading selected trial...');self.auto_timer.start()
+    def cache_trial(self,data):
+        if getattr(self,'pending_folder',False):return False
+        key=tuple(data['trial'].split());expected=self.paths.get(key)
+        if expected is None or pathlib.Path(data['source_files'][0]).resolve()!=pathlib.Path(expected).resolve():return False
+        if str(data.get('study_root'))!=str(STUDY_ROOT):return False
+        self.datasets[data['trial']]=data;return True
     def load_trial(self):
-        if self.worker and self.worker.isRunning():return
-        key=(self.participant.currentText(),self.trial.currentText());path=self.paths.get(key)
+        self.auto_timer.stop()
+        if getattr(self,'pending_folder',False):return
+        if self.worker and self.worker.isRunning():self.auto_timer.start();return
+        key=(self.participant.currentText(),self.trial.currentText().split(' ')[0]);path=self.paths.get(key)
         if ' '.join(key) in self.datasets:
             self.loaded(self.datasets[' '.join(key)]);return
         if path is None and key==('P03','T01'):
@@ -239,14 +289,14 @@ class Explorer(QtWidgets.QMainWindow):
         if path is None:return
         self.signals.hide();self.data=None
         self.load.setEnabled(False);self.message.setText('Calculating ECG quality and movement. This may take a minute…')
-        self.worker=Worker(path,' '.join(key));self.worker.ready.connect(self.accept_trial);self.worker.failed.connect(self.failed);self.worker.finished.connect(lambda:self.load.setEnabled(True));self.worker.start()
+        self.worker=Worker(path,' '.join(key),STUDY_ROOT);self.worker.ready.connect(self.accept_trial);self.worker.failed.connect(self.failed);self.worker.finished.connect(lambda:self.load.setEnabled(True));self.worker.start()
     def accept_trial(self,data):
-        self.datasets[data['trial']]=data
-        if data['trial']==' '.join((self.participant.currentText(),self.trial.currentText())):self.loaded(data)
+        if not self.cache_trial(data):return
+        if data['trial']==' '.join((self.participant.currentText(),self.trial.currentText().split(' ')[0])):self.loaded(data)
     def failed(self,text):self.message.setText('Could not load this trial: '+text)
     def loaded(self,data):
         from annotation_loader import latest_annotations
-        latest=latest_annotations(ROOT,data['trial'])
+        latest=None if data.get('annotation_override') else latest_annotations(ROOT,data['trial'])
         if latest is not None:
             data=dict(data,annotations=latest,annotations_synced=True)
             self.reviewed.setChecked(False)
@@ -267,13 +317,13 @@ class Explorer(QtWidgets.QMainWindow):
         self.table.setRowCount(len(ann))
         for i,a in enumerate(ann):
             for j,value in enumerate([f"{a['video_start_s']}–{a['video_end_s']} s",a['label'].replace('_',' '),a.get('review_status','unknown'),a.get('notes','')]):self.table.setItem(i,j,QtWidgets.QTableWidgetItem(str(value)))
-        self.message.setText('')
+        self.message.setText('Excluded trial — omitted from combined study summaries.' if data.get('excluded') else '')
         if data['windows']:self.select(data['windows'][0],False)
         self.signals.load(data)
         self.redraw()
         key=tuple(data['trial'].split());path=self.paths.get(key)
-        if path:
-            pass
+        if path and data.get('study_root')==str(STUDY_ROOT):
+            (ROOT/'study-settings.json').write_text(json.dumps({'folder':str(STUDY_ROOT)}),encoding='utf-8')
     def events(self,w):
         if not self.data:return []
         off=self.offset.value()
@@ -342,8 +392,8 @@ class Explorer(QtWidgets.QMainWindow):
             if not required.issubset(a.columns):raise ValueError('Annotation CSV needs participant, trial, label and video start/end seconds.')
             if set(a.participant.astype(str)+' '+a.trial.astype(str))!={self.data['trial']}:raise ValueError('Annotations belong to a different participant or trial.')
             start=pd.to_numeric(a.video_start_s,errors='raise');end=pd.to_numeric(a.video_end_s,errors='raise')
-            if not ((start>=0)&(end>start)).all():raise ValueError('Annotation intervals must have valid increasing times.')
-            old_video=self.player.source();updated=dict(self.data);updated['annotations']=a.to_dict('records');self.loaded(updated)
+            if not (np.isfinite(start)&np.isfinite(end)&(start>=0)&(end>start)).all():raise ValueError('Annotation intervals must have valid increasing times.')
+            old_video=self.player.source();updated=dict(self.data);updated['annotations']=a.to_dict('records');updated['annotation_override']=True;self.loaded(updated)
             if not old_video.isEmpty():self.player.setSource(old_video)
         except Exception as e:QtWidgets.QMessageBox.information(self,'Could not load annotations',str(e))
     def play(self):
@@ -368,6 +418,7 @@ class Explorer(QtWidgets.QMainWindow):
     def closeEvent(self,event):
         if self.worker and self.worker.isRunning():
             QtWidgets.QMessageBox.information(self,'Analysis running','Please wait for the current trial calculation before closing.');event.ignore();return
+        if any(w.isRunning() for w in self.folder_workers):event.ignore();return
         self.player.stop();event.accept()
 if __name__=='__main__':
     app=QtWidgets.QApplication(sys.argv);app.setStyle('Fusion')
